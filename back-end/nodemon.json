@@ -1,0 +1,14 @@
+{
+  "watch": [
+    "server.js",
+    "src/**"
+  ],
+  "ignore": [
+    "data/**",
+    "docs/**",
+    "coverage/**",
+    "test/**",
+    "node_modules/**"
+  ],
+  "ext": "js,json"
+}

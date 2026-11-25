@@ -1,0 +1,529 @@
+'use strict';
+
+const platformAuthService = require('../services/platformAuth.service');
+const organizationService = require('../services/organization.service');
+const subscriptionPlanService = require('../services/subscriptionPlan.service');
+const subscriptionService = require('../services/subscription.service');
+const provisioningService = require('../services/provisioning.service');
+const platformActivityService = require('../services/platformActivity.service');
+const serviceCatalog = require('../config/serviceCatalog');
+const resourceCatalog = require('../config/resourceCatalog');
+const dataStore = require('../store/dataStore');
+const { createLogger } = require('../utils/logger');
+const { sendResult } = require('../utils/sendResult');
+
+const logger = createLogger('🛰️  Platform');
+
+// ---- Platform auth ----
+
+function login(req, res) {
+  const { email, password } = req.body;
+  const result = platformAuthService.login(email, password);
+  if (result.error) {
+    logger.log(`❌ PLATFORM LOGIN FAILED  email=${email}`);
+    return res.status(401).json({
+      message: 'Invalid email or password',
+      error: 'Unauthorized',
+      statusCode: 401,
+    });
+  }
+  logger.log(`✅ PLATFORM LOGIN  email=${email}`);
+  res.status(200).json(result);
+}
+
+function me(req, res) {
+  const result = platformAuthService.me(req.session);
+  if (!result)
+    return res.status(401).json({
+      message: 'Authentication required',
+      error: 'Unauthorized',
+      statusCode: 401,
+    });
+  res.status(200).json(result);
+}
+
+function logout(req, res) {
+  const header = req.headers['authorization'] || '';
+  const [, headerToken] = header.split(' ');
+  const token = headerToken || (req.session && req.session.token);
+  if (token) platformAuthService.logout(token);
+  res.setHeader('Set-Cookie', 'sessionId=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax');
+  res.status(200).json({ success: true });
+}
+
+// ---- Organizations ----
+
+function findAllOrganizations(req, res) {
+  sendResult(res, organizationService.findAll(), 200);
+}
+
+function findOrganization(req, res) {
+  sendResult(res, organizationService.findById(+req.params.id), 200);
+}
+
+function createOrganization(req, res) {
+  const result = provisioningService.provision(req.body);
+  if (result.error) {
+    const [status, message] = provisioningService.errorResponseFor(result);
+    return res.status(status).json({
+      message,
+      error: status === 409 ? 'Conflict' : 'Bad Request',
+      statusCode: status,
+    });
+  }
+  logger.log(
+    `✅ PROVISIONED ORGANIZATION  id=${result.organization.organization_id}  name="${result.organization.name}"`,
+  );
+  platformActivityService.log(
+    req.session.userId,
+    'PROVISION_ORGANIZATION',
+    result.organization.organization_id,
+    `Provisioned "${result.organization.name}"`,
+  );
+  sendResult(res, result, 201);
+}
+
+/**
+ * Moves an organization to a new email domain, renaming every staff/admin
+ * login on the old one. Platform-only: a Hospital Admin changing it could
+ * lock their own staff out.
+ */
+function changeEmailDomain(req, res) {
+  const result = organizationService.changeEmailDomain(
+    +req.params.id,
+    req.body.email_domain,
+  );
+  if (result.error) {
+    const [status, message] = provisioningService.errorResponseFor(result);
+    return res.status(status).json({
+      message,
+      error:
+        status === 409
+          ? 'Conflict'
+          : status === 404
+            ? 'Not Found'
+            : 'Bad Request',
+      statusCode: status,
+    });
+  }
+  const { organization, previousDomain, renamedUsers } = result;
+  logger.log(
+    `✉️  EMAIL DOMAIN  organization_id=${organization.organization_id}  ${previousDomain} → ${organization.email_domain}  renamed=${renamedUsers.length}`,
+  );
+  platformActivityService.log(
+    req.session.userId,
+    'CHANGE_EMAIL_DOMAIN',
+    organization.organization_id,
+    `Changed "${organization.name}" email domain from ${previousDomain} to ${organization.email_domain} (${renamedUsers.length} staff logins renamed)`,
+  );
+  sendResult(res, result, 200);
+}
+
+function emailDomainImpact(req, res) {
+  const organization = organizationService.findById(+req.params.id);
+  if (!organization) {
+    return res.status(404).json({
+      message: 'Organization not found',
+      error: 'Not Found',
+      statusCode: 404,
+    });
+  }
+  sendResult(
+    res,
+    {
+      email_domain: organization.email_domain || null,
+      staff_logins: organizationService.staffLoginCount(
+        organization.organization_id,
+      ),
+    },
+    200,
+  );
+}
+
+function suspendOrganization(req, res) {
+  const result = organizationService.setStatus(+req.params.id, 'SUSPENDED');
+  if (result) {
+    logger.log(`⏸️  SUSPENDED  organization_id=${result.organization_id}`);
+    platformActivityService.log(
+      req.session.userId,
+      'SUSPEND_ORGANIZATION',
+      result.organization_id,
+      `Suspended "${result.name}"`,
+    );
+  }
+  sendResult(res, result, 200);
+}
+
+function activateOrganization(req, res) {
+  const result = organizationService.setStatus(+req.params.id, 'ACTIVE');
+  if (result) {
+    logger.log(`▶️  ACTIVATED  organization_id=${result.organization_id}`);
+    platformActivityService.log(
+      req.session.userId,
+      'ACTIVATE_ORGANIZATION',
+      result.organization_id,
+      `Activated "${result.name}"`,
+    );
+  }
+  sendResult(res, result, 200);
+}
+
+function deleteOrganization(req, res) {
+  const result = organizationService.remove(+req.params.id);
+  if (result) {
+    logger.log(`🗑️  DELETED  organization_id=${result.organization_id}`);
+    platformActivityService.log(
+      req.session.userId,
+      'DELETE_ORGANIZATION',
+      result.organization_id,
+      `Deleted "${result.name}"`,
+    );
+  }
+  sendResult(res, result, 200);
+}
+
+function activityLog(req, res) {
+  sendResult(res, platformActivityService.findAll(), 200);
+}
+
+function provisioningLog(req, res) {
+  const organizationId = +req.params.id;
+  sendResult(
+    res,
+    dataStore.provisioningLog.filter(
+      (l) => l.organization_id === organizationId,
+    ),
+    200,
+  );
+}
+
+function usage(req, res) {
+  sendResult(res, organizationService.usageFor(+req.params.id), 200);
+}
+
+function platformUsage(req, res) {
+  const organizations = organizationService.findAll();
+  const orgDetails = organizations.map((o) => {
+    const usageData = organizationService.usageFor(o.organization_id);
+    return {
+      organization_id: o.organization_id,
+      name: o.name,
+      email_domain: o.email_domain || null,
+      status: o.status,
+      ...usageData,
+    };
+  });
+
+  // Platform financial analytics (MRR / ARR) — revenue is usage-based, so
+  // it is broken down per SERVICE, not per fixed plan tier. Each active
+  // org contributes: Σ (service unit price × instances) for the services
+  // it has enabled.
+  let totalMrr = 0;
+  const revenueByService = {};
+  Object.keys(serviceCatalog.SERVICE_NAMES).forEach((code) => {
+    revenueByService[serviceCatalog.SERVICE_NAMES[code]] = {
+      code,
+      price_monthly: serviceCatalog.priceFor(code),
+      active_subscriptions: 0,
+      total_income: 0,
+    };
+  });
+
+  orgDetails.forEach((org) => {
+    if (org.status === 'ACTIVE' && org.subscription) {
+      totalMrr += Number(org.subscription.price_monthly) || 0;
+      (org.subscription.service_lines || []).forEach((line) => {
+        const bucket = revenueByService[line.name];
+        if (bucket) {
+          bucket.active_subscriptions += 1;
+          bucket.total_income += Number(line.amount) || 0;
+        }
+      });
+      (org.subscription.resource_lines || []).forEach((rLine) => {
+        const bucket = revenueByService[serviceCatalog.SERVICE_NAMES[rLine.module_code]];
+        if (bucket) {
+          bucket.total_income += Number(rLine.amount) || 0;
+        }
+      });
+    }
+  });
+
+  const totalArr = totalMrr * 12;
+
+  sendResult(
+    res,
+    {
+      total_organizations: organizations.length,
+      active_organizations: organizations.filter((o) => o.status === 'ACTIVE')
+        .length,
+      suspended_organizations: organizations.filter(
+        (o) => o.status === 'SUSPENDED',
+      ).length,
+      total_users: dataStore.users.length,
+      total_patients: dataStore.patients.length,
+      total_hospitals: dataStore.hospitals.length,
+      total_active_admissions: dataStore.admissions.filter(
+        (a) => a.status !== 'DISCHARGED',
+      ).length,
+      total_payments_collected: dataStore.payments.reduce(
+        (s, p) => s + Number(p.amount_paid || 0),
+        0,
+      ),
+      total_mrr: totalMrr,
+      total_arr: totalArr,
+      // Key kept as `revenue_by_plan` for dashboard back-compat; content is
+      // now a per-service breakdown.
+      revenue_by_plan: revenueByService,
+      revenue_by_service: revenueByService,
+      organizations: orgDetails,
+    },
+    200,
+  );
+}
+
+// ---- Hospitals (branches) ----
+
+function findHospitals(req, res) {
+  sendResult(res, organizationService.hospitalsFor(+req.params.id), 200);
+}
+
+function createHospital(req, res) {
+  const result = organizationService.createHospital(+req.params.id, req.body);
+  logger.log(
+    `✅ BRANCH CREATED  hospital_id=${result.hospital_id}  organization_id=${result.organization_id}`,
+  );
+  sendResult(res, result, 201);
+}
+
+// ---- Resource-level entitlements ----
+
+function moduleResourceCatalog(req, res) {
+  sendResult(res, resourceCatalog.RESOURCE_CATALOG, 200);
+}
+
+function findResources(req, res) {
+  sendResult(res, organizationService.resourceCatalogFor(+req.params.id), 200);
+}
+
+/**
+ * Body: { resources: { MODULE_CODE: { RESOURCE_CODE: quantity } } }.
+ * Merges into whatever the org already has (only the resource types present
+ * in the body are touched).
+ */
+function setResources(req, res) {
+  const resources =
+    req.body && typeof req.body.resources === 'object'
+      ? req.body.resources
+      : req.body;
+  const result = organizationService.setResourceQuantities(
+    +req.params.id,
+    resources,
+  );
+  logger.log(
+    `📦 RESOURCES SET  organization_id=${req.params.id}  ${JSON.stringify(result)}`,
+  );
+  platformActivityService.log(
+    req.session.userId,
+    'SET_RESOURCES',
+    +req.params.id,
+    'Resource entitlements updated',
+  );
+  sendResult(res, result, 200);
+}
+
+// ---- API keys ----
+
+function findApiKeys(req, res) {
+  sendResult(
+    res,
+    dataStore.apiKeys.filter((k) => k.organization_id === +req.params.id),
+    200,
+  );
+}
+
+function createApiKey(req, res) {
+  const result = provisioningService.generateApiKey(
+    +req.params.id,
+    req.body.label,
+  );
+  logger.log(`🔑 API KEY GENERATED  organization_id=${req.params.id}`);
+  sendResult(res, result, 201);
+}
+
+function revokeApiKey(req, res) {
+  const key = dataStore.apiKeys.find((k) => k.api_key_id === +req.params.id);
+  if (!key) return sendResult(res, null, 200);
+  key.revoked_at = new Date().toISOString();
+  sendResult(res, key, 200);
+}
+
+// ---- Subscription plans ----
+
+function findAllPlans(req, res) {
+  sendResult(res, subscriptionPlanService.findAll(), 200);
+}
+
+function createPlan(req, res) {
+  const result = subscriptionPlanService.create(req.body);
+  logger.log(`✅ PLAN CREATED  id=${result.plan_id}  name="${result.name}"`);
+  platformActivityService.log(
+    req.session.userId,
+    'CREATE_PLAN',
+    null,
+    `Created plan "${result.name}"`,
+  );
+  sendResult(res, result, 201);
+}
+
+function updatePlan(req, res) {
+  sendResult(
+    res,
+    subscriptionPlanService.update(+req.params.id, req.body),
+    200,
+  );
+}
+
+// ---- Subscriptions ----
+
+function getSubscription(req, res) {
+  const organizationId = +req.params.id;
+  const subscription = subscriptionService.findByOrg(organizationId);
+  if (!subscription) return sendResult(res, null, 200);
+  const plan = subscriptionPlanService.findById(subscription.plan_id);
+  sendResult(res, { subscription, plan }, 200);
+}
+
+function setSubscription(req, res) {
+  const result = subscriptionService.setPlan(+req.params.id, req.body.plan_id);
+  if (result.error)
+    return res.status(400).json({
+      message: 'Unknown subscription plan',
+      error: 'Bad Request',
+      statusCode: 400,
+    });
+  logger.log(
+    `📦 SUBSCRIPTION SET  organization_id=${req.params.id}  plan_id=${req.body.plan_id}`,
+  );
+  platformActivityService.log(
+    req.session.userId,
+    'SET_SUBSCRIPTION',
+    +req.params.id,
+    `Plan set to "${result.plan.name}"`,
+  );
+  sendResult(res, result, 200);
+}
+
+function renewSubscription(req, res) {
+  const result = subscriptionService.renew(+req.params.id);
+  if (result)
+    platformActivityService.log(
+      req.session.userId,
+      'RENEW_SUBSCRIPTION',
+      +req.params.id,
+      'Subscription renewed',
+    );
+  sendResult(res, result, 200);
+}
+
+function getGlobalRates(req, res) {
+  if (!dataStore.platformRates) {
+    dataStore.platformRates = {
+      base_platform_fee: 3000,
+      rates: {
+        GENERAL_BEDS: 150,
+        ICU_BEDS: 600,
+        PRIVATE_BEDS: 350,
+        SEMI_PRIVATE_BEDS: 350,
+        DOCTOR_SEATS: 150,
+        STAFF_SEATS: 200,
+        BILLING_TERMINALS: 500,
+        WAREHOUSES: 1000,
+        PATIENT_ADMISSIONS: 10,
+      },
+      updated_at: new Date().toISOString(),
+    };
+  }
+  const payload = {
+    ...dataStore.platformRates,
+    base_fee: dataStore.platformRates.base_platform_fee,
+  };
+  sendResult(res, payload, 200);
+}
+
+function updateGlobalRates(req, res) {
+  const { base_platform_fee, base_fee, rates } = req.body;
+  if (!dataStore.platformRates) {
+    dataStore.platformRates = {
+      base_platform_fee: 3000,
+      rates: {
+        GENERAL_BEDS: 150,
+        ICU_BEDS: 600,
+        PRIVATE_BEDS: 350,
+        SEMI_PRIVATE_BEDS: 350,
+        DOCTOR_SEATS: 150,
+        STAFF_SEATS: 200,
+        BILLING_TERMINALS: 500,
+        WAREHOUSES: 1000,
+        PATIENT_ADMISSIONS: 10,
+      },
+      updated_at: new Date().toISOString(),
+    };
+  }
+  const effectiveBaseFee = base_platform_fee !== undefined ? base_platform_fee : base_fee;
+  if (effectiveBaseFee !== undefined) {
+    dataStore.platformRates.base_platform_fee = Math.max(0, Number(effectiveBaseFee) || 0);
+  }
+  if (rates && typeof rates === 'object') {
+    Object.keys(rates).forEach((k) => {
+      dataStore.platformRates.rates[k] = Math.max(0, Number(rates[k]) || 0);
+    });
+  }
+  dataStore.platformRates.updated_at = new Date().toISOString();
+
+  platformActivityService.log(
+    req.session && req.session.userId ? req.session.userId : 1,
+    'UPDATE_GLOBAL_RATES',
+    null,
+    'Updated global SaaS platform pricing rates',
+  );
+
+  const payload = {
+    ...dataStore.platformRates,
+    base_fee: dataStore.platformRates.base_platform_fee,
+  };
+  sendResult(res, payload, 200);
+}
+
+module.exports = {
+  login,
+  me,
+  logout,
+  findAllOrganizations,
+  findOrganization,
+  createOrganization,
+  changeEmailDomain,
+  emailDomainImpact,
+  suspendOrganization,
+  activateOrganization,
+  deleteOrganization,
+  provisioningLog,
+  activityLog,
+  usage,
+  platformUsage,
+  findHospitals,
+  createHospital,
+  moduleResourceCatalog,
+  findResources,
+  setResources,
+  findApiKeys,
+  createApiKey,
+  revokeApiKey,
+  findAllPlans,
+  createPlan,
+  updatePlan,
+  getSubscription,
+  setSubscription,
+  renewSubscription,
+  getGlobalRates,
+  updateGlobalRates,
+};

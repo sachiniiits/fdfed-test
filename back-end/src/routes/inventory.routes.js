@@ -1,0 +1,61 @@
+'use strict';
+
+const { Router } = require('express');
+const controller = require('../controllers/inventory.controller');
+const { authorize } = require('../middleware/actorAccess');
+const { validateBody } = require('../validators/engine');
+const {
+  createInventoryItemRules,
+  updateInventoryItemRules,
+  createPurchaseRequestRules,
+  updatePurchaseRequestRules,
+  allowInventoryItemUpdateFields,
+  allowPurchaseRequestUpdateFields,
+} = require('../validators/inventory.validators');
+
+const router = Router();
+
+router.get(
+  '/items',
+  authorize(['ADMIN', 'SUPER_USER'], 'inventory', 'read'),
+  controller.findAllItems,
+);
+router.post(
+  '/items',
+  authorize(['SUPER_USER'], 'inventoryCatalog', 'write'),
+  validateBody(createInventoryItemRules),
+  controller.createItem,
+);
+router.put(
+  '/items/:id',
+  authorize(['SUPER_USER'], 'inventory', 'write'),
+  validateBody(updateInventoryItemRules),
+  allowInventoryItemUpdateFields,
+  controller.updateItem,
+);
+router.delete(
+  '/items/:id',
+  authorize(['SUPER_USER'], 'inventoryCatalog', 'delete'),
+  controller.deleteItem,
+);
+
+router.get(
+  '/requests',
+  authorize(['ADMIN', 'SUPER_USER'], 'inventory', 'read'),
+  controller.findAllRequests,
+);
+router.post(
+  '/requests',
+  authorize(['SUPER_USER'], 'inventory', 'write'),
+  validateBody(createPurchaseRequestRules),
+  controller.createRequest,
+);
+router.put(
+  '/requests/:id',
+  authorize(['SUPER_USER'], 'inventory', 'write'),
+  validateBody(updatePurchaseRequestRules),
+  allowPurchaseRequestUpdateFields,
+  controller.updateRequest,
+);
+
+module.exports = router;
