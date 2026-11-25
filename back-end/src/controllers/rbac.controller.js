@@ -1,0 +1,229 @@
+'use strict';
+
+const rbacService = require('../services/rbac.service');
+const dataStore = require('../store/dataStore');
+const { createLogger } = require('../utils/logger');
+const { sendResult } = require('../utils/sendResult');
+const { destroySessionsForUser } = require('../store/sessionStore');
+
+const logger = createLogger('🛡️  RBAC');
+const FORBIDDEN = {
+  message: 'Forbidden resource',
+  error: 'Forbidden',
+  statusCode: 403,
+};
+
+function listRoles(req, res) {
+  sendResult(res, rbacService.listRoles(req.tenant.organizationId), 200);
+}
+
+function createRole(req, res) {
+  const result = rbacService.createRole(req.tenant.organizationId, req.body);
+  logger.log(
+    `✅ ROLE CREATED  id=${result.custom_role_id}  name="${result.role_name}"  org=${req.tenant.organizationId}`,
+  );
+  sendResult(res, result, 201);
+}
+
+function listPermissions(req, res) {
+  sendResult(res, rbacService.listPermissions(), 200);
+}
+
+function assignPermission(req, res) {
+  const role = rbacService.findRole(req.tenant.organizationId, +req.params.id);
+  if (!role)
+    return res
+      .status(404)
+      .json({ message: 'Role not found', error: 'Not Found', statusCode: 404 });
+  const result = rbacService.assignPermission(
+    role.custom_role_id,
+    req.body.permission_id,
+  );
+  sendResult(res, result, 200);
+}
+
+function permissionsForRole(req, res) {
+  const role = rbacService.findRole(req.tenant.organizationId, +req.params.id);
+  if (!role)
+    return res
+      .status(404)
+      .json({ message: 'Role not found', error: 'Not Found', statusCode: 404 });
+  sendResult(res, rbacService.permissionsForRole(role.custom_role_id), 200);
+}
+
+function unassignPermission(req, res) {
+  const role = rbacService.findRole(req.tenant.organizationId, +req.params.id);
+  if (!role)
+    return res
+      .status(404)
+      .json({ message: 'Role not found', error: 'Not Found', statusCode: 404 });
+  const result = rbacService.unassignPermission(
+    role.custom_role_id,
+    +req.params.permissionId,
+  );
+  sendResult(res, result, 200);
+}
+
+// A custom role may only ever be assigned to a staff account (HOM/PRE/FA)
+// belonging to the SAME organization — never a Patient, never cross-org.
+function assignStaffRole(req, res) {
+  const role = rbacService.findRole(
+    req.tenant.organizationId,
+    req.body.custom_role_id,
+  );
+  if (!role)
+    return res
+      .status(404)
+      .json({ message: 'Role not found', error: 'Not Found', statusCode: 404 });
+
+  const targetUser = dataStore.users.find(
+    (u) => u.user_id === +req.params.userId,
+  );
+  if (
+    !targetUser ||
+    targetUser.organization_id !== req.tenant.organizationId ||
+    targetUser.role_id === 2
+  ) {
+    return res.status(403).json(FORBIDDEN);
+  }
+
+  const result = rbacService.assignStaffRole(
+    targetUser.user_id,
+    role.custom_role_id,
+  );
+  logger.log(
+    `✅ ROLE ASSIGNED  user_id=${targetUser.user_id}  role_id=${role.custom_role_id}`,
+  );
+  sendResult(res, result, 200);
+}
+
+// Same org/non-Patient guard as assignStaffRole above — removing a role
+// from a user outside the caller's org (or from a Patient, who can never
+// have one) is refused rather than silently no-op-ing.
+function unassignStaffRole(req, res) {
+  const targetUser = dataStore.users.find(
+    (u) => u.user_id === +req.params.userId,
+  );
+  if (
+    !targetUser ||
+    targetUser.organization_id !== req.tenant.organizationId ||
+    targetUser.role_id === 2
+  ) {
+    return res.status(403).json(FORBIDDEN);
+  }
+  const result = rbacService.unassignStaffRole(
+    targetUser.user_id,
+    +req.params.roleId,
+  );
+  logger.log(
+    `➖ ROLE UNASSIGNED  user_id=${targetUser.user_id}  role_id=${req.params.roleId}`,
+  );
+  sendResult(res, result, 200);
+}
+
+function listStaff(req, res) {
+  sendResult(res, rbacService.staffFor(req.tenant.organizationId), 200);
+}
+
+// Admin creates a staff login (HOM/PRE/FA) for its own organization. The
+// person then signs in to their portal with the email + password set here.
+const STAFF_CREATE_ERRORS = {
+  INVALID_ROLE: [400, 'Role must be one of HOM, PRE, FA', 'Bad Request'],
+  INVALID_EMAIL: [400, 'A valid email is required', 'Bad Request'],
+  EMAIL_TAKEN: [409, 'That email is already registered', 'Conflict'],
+};
+
+/** Staff emails must be name.<role>@<the hospital's domain> (unified login). */
+function staffEmailMessage(result) {
+  const tag = String(result.role || '').toLowerCase();
+  return `${result.role} staff emails must look like name.${tag}@${result.email_domain || 'yourhospital.com'}`;
+}
+
+function createStaff(req, res) {
+  const result = rbacService.createStaffUser(req.tenant.organizationId, req.body);
+  if (result && result.error) {
+    if (
+      result.error === 'EMAIL_ROLE_MISMATCH' ||
+      result.error === 'EMAIL_DOMAIN_MISMATCH'
+    ) {
+      return res.status(400).json({
+        message: staffEmailMessage(result),
+        error: 'Bad Request',
+        statusCode: 400,
+      });
+    }
+    const [status, message, error] =
+      STAFF_CREATE_ERRORS[result.error] || STAFF_CREATE_ERRORS.INVALID_ROLE;
+    return res.status(status).json({ message, error, statusCode: status });
+  }
+  logger.log(
+    `✅ STAFF CREATED  user_id=${result.user_id}  role=${result.actor_role}  org=${req.tenant.organizationId}`,
+  );
+  sendResult(res, result, 201);
+}
+
+/** The org's own non-Patient, non-Admin user named by :userId, or null. */
+function staffTarget(req) {
+  const targetUser = dataStore.users.find(
+    (u) => u.user_id === +req.params.userId,
+  );
+  if (
+    !targetUser ||
+    targetUser.organization_id !== req.tenant.organizationId ||
+    targetUser.role_id === 2 ||
+    targetUser.role_id === 5
+  ) {
+    return null;
+  }
+  return targetUser;
+}
+
+function setStaffActive(req, res) {
+  const targetUser = staffTarget(req);
+  if (!targetUser) return res.status(403).json(FORBIDDEN);
+  const result = rbacService.setStaffActive(
+    targetUser.user_id,
+    Boolean(req.body.is_active),
+  );
+  if (!result.is_active) destroySessionsForUser(targetUser.user_id);
+  sendResult(res, result, 200);
+}
+
+// PUT /rbac/staff/:userId/actor-role — the Staff Directory's role dropdown.
+function setStaffRole(req, res) {
+  const targetUser = staffTarget(req);
+  if (!targetUser) return res.status(403).json(FORBIDDEN);
+  const result = rbacService.setStaffRole(targetUser.user_id, req.body.actor_role);
+  if (result && result.error) {
+    const [status, message, error] =
+      result.error === 'EMAIL_TAKEN'
+        ? [
+            409,
+            'Changing the role renames the login email, and that address is already registered',
+            'Conflict',
+          ]
+        : STAFF_CREATE_ERRORS.INVALID_ROLE;
+    return res.status(status).json({ message, error, statusCode: status });
+  }
+  // Live sessions carry the old role; make the change effective now.
+  destroySessionsForUser(targetUser.user_id);
+  logger.log(
+    `✏️  STAFF ROLE  user_id=${targetUser.user_id}  role=${result.actor_role}  org=${req.tenant.organizationId}`,
+  );
+  sendResult(res, result, 200);
+}
+
+module.exports = {
+  listRoles,
+  createRole,
+  listPermissions,
+  permissionsForRole,
+  assignPermission,
+  unassignPermission,
+  assignStaffRole,
+  unassignStaffRole,
+  listStaff,
+  createStaff,
+  setStaffActive,
+  setStaffRole,
+};

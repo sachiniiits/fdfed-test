@@ -1,0 +1,57 @@
+{
+  "name": "back-end",
+  "version": "0.0.1",
+  "description": "",
+  "author": "",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:dev": "nodemon server.js",
+    "start:prod": "node server.js",
+    "format": "prettier --write \"src/**/*.js\" \"test/**/*.js\"",
+    "lint": "eslint \"server.js\" \"src/**/*.js\" \"test/**/*.js\" \"scripts/**/*.js\"",
+    "db:reset": "node scripts/reset-database.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:cov": "jest --coverage",
+    "test:e2e": "jest --config ./test/jest-e2e.json"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.6.2",
+    "helmet": "^8.3.0",
+    "libphonenumber-js": "^1.11.14",
+    "multer": "^2.2.0",
+    "swagger-ui-express": "^5.0.1",
+    "validator": "^13.12.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-prettier": "^5.2.2",
+    "globals": "^17.0.0",
+    "jest": "^30.0.0",
+    "nodemon": "^3.1.9",
+    "prettier": "^3.4.2",
+    "supertest": "^7.0.0"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json"
+    ],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.js$",
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "**/*.js"
+    ],
+    "coverageDirectory": "../coverage"
+  }
+}

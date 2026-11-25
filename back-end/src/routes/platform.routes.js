@@ -1,0 +1,127 @@
+'use strict';
+
+const { Router } = require('express');
+const controller = require('../controllers/platform.controller');
+const { requireSession } = require('../middleware/session');
+const { requirePlatformUser } = require('../middleware/platformAccess');
+const { validateBody } = require('../validators/engine');
+const {
+  platformLoginRules,
+  provisionOrganizationRules,
+  createHospitalRules,
+  createApiKeyRules,
+  createPlanRules,
+  setSubscriptionRules,
+  changeEmailDomainRules,
+} = require('../validators/platform.validators');
+
+const router = Router();
+const gate = [requireSession, requirePlatformUser];
+
+// Auth
+router.post('/auth/login', validateBody(platformLoginRules), controller.login);
+router.get('/auth/me', requireSession, requirePlatformUser, controller.me);
+router.post(
+  '/auth/logout',
+  requireSession,
+  requirePlatformUser,
+  controller.logout,
+);
+
+// Organizations
+router.get('/organizations', ...gate, controller.findAllOrganizations);
+router.post(
+  '/organizations',
+  ...gate,
+  validateBody(provisionOrganizationRules),
+  controller.createOrganization,
+);
+router.get('/organizations/:id', ...gate, controller.findOrganization);
+router.get(
+  '/organizations/:id/email-domain',
+  ...gate,
+  controller.emailDomainImpact,
+);
+router.patch(
+  '/organizations/:id/email-domain',
+  ...gate,
+  validateBody(changeEmailDomainRules),
+  controller.changeEmailDomain,
+);
+router.put(
+  '/organizations/:id/suspend',
+  ...gate,
+  controller.suspendOrganization,
+);
+router.put(
+  '/organizations/:id/activate',
+  ...gate,
+  controller.activateOrganization,
+);
+router.delete('/organizations/:id', ...gate, controller.deleteOrganization);
+router.get(
+  '/organizations/:id/provisioning-log',
+  ...gate,
+  controller.provisioningLog,
+);
+router.get('/organizations/:id/usage', ...gate, controller.usage);
+router.get('/usage', ...gate, controller.platformUsage);
+router.get('/activity-log', ...gate, controller.activityLog);
+
+// Hospitals (branches)
+router.get('/organizations/:id/hospitals', ...gate, controller.findHospitals);
+router.post(
+  '/organizations/:id/hospitals',
+  ...gate,
+  validateBody(createHospitalRules),
+  controller.createHospital,
+);
+
+// Resource-level entitlements
+router.get('/module-resource-catalog', ...gate, controller.moduleResourceCatalog);
+router.get('/organizations/:id/resources', ...gate, controller.findResources);
+router.put('/organizations/:id/resources', ...gate, controller.setResources);
+
+// API keys
+router.get('/organizations/:id/api-keys', ...gate, controller.findApiKeys);
+router.post(
+  '/organizations/:id/api-keys',
+  ...gate,
+  validateBody(createApiKeyRules),
+  controller.createApiKey,
+);
+router.delete('/api-keys/:id', ...gate, controller.revokeApiKey);
+
+// Subscription plans
+router.get('/plans', ...gate, controller.findAllPlans);
+router.post(
+  '/plans',
+  ...gate,
+  validateBody(createPlanRules),
+  controller.createPlan,
+);
+router.put('/plans/:id', ...gate, controller.updatePlan);
+
+// Subscriptions
+router.get(
+  '/organizations/:id/subscription',
+  ...gate,
+  controller.getSubscription,
+);
+router.put(
+  '/organizations/:id/subscription',
+  ...gate,
+  validateBody(setSubscriptionRules),
+  controller.setSubscription,
+);
+router.put(
+  '/organizations/:id/subscription/renew',
+  ...gate,
+  controller.renewSubscription,
+);
+
+// Global SaaS pricing rate card
+router.get('/rates', controller.getGlobalRates);
+router.put('/rates', ...gate, controller.updateGlobalRates);
+
+module.exports = router;

@@ -1,0 +1,34 @@
+// @ts-check
+import eslint from '@eslint/js';
+import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
+import globals from 'globals';
+
+export default [
+  {
+    ignores: ['eslint.config.mjs', 'coverage/**', 'docs/**'],
+  },
+  eslint.configs.recommended,
+  eslintPluginPrettierRecommended,
+  {
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'commonjs',
+      globals: {
+        ...globals.node,
+        ...globals.jest,
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      // The existing backend has mixed formatter output; keep this lint command
+      // read-only and focused on actionable ESLint diagnostics.
+      'prettier/prettier': 'off',
+    },
+  },
+  {
+    files: ['src/test/frontend_shared.spec.js'],
+    languageOptions: {
+      globals: globals.browser,
+    },
+  },
+];
